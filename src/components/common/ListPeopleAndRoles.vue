@@ -168,7 +168,20 @@
               class="actions-column"
               :class="{'disabled':disabled}"
             >
-              <div class="float-right">
+              <!-- read-only (adopted director) rows have no actions - flag invalid data instead -->
+              <div
+                v-if="isReadonlyRow(orgPerson)"
+                class="text-center"
+              >
+                <InvalidDataIcon
+                  title="This director's information has the following issues:"
+                  :issues="directorIssues(orgPerson)"
+                />
+              </div>
+              <div
+                v-else
+                class="float-right"
+              >
                 <span class="edit-action">
                   <v-btn
                     :id="`officer-${index1}-change-btn`"
@@ -231,6 +244,8 @@ import { BaseAddress } from '@bcrs-shared-components/base-address'
 import { CommonMixin } from '@/mixins'
 import { OrgPersonIF, PeopleAndRoleIF } from '@/interfaces'
 import { PartyTypes, RoleTypes, RouteNames } from '@/enums'
+import { GetOrgPersonIssues } from '@/utils'
+import InvalidDataIcon from '@/components/common/InvalidDataIcon.vue'
 
 /**
  * This is a sub-component of PeopleAndRoles and
@@ -239,6 +254,7 @@ import { PartyTypes, RoleTypes, RouteNames } from '@/enums'
 @Component({
   components: {
     DeliveryAddress: BaseAddress,
+    InvalidDataIcon,
     MailingAddress: BaseAddress
   }
 })
@@ -249,9 +265,11 @@ export default class ListPeopleAndRoles extends Mixins(CommonMixin) {
   @Prop({ default: true }) readonly showRolesColumn!: boolean
   @Prop({ default: false }) readonly showEmailColumn!: boolean
   @Prop({ default: true }) readonly showDirectors!: boolean
+  @Prop({ default: false }) readonly readonlyDirectors!: boolean
 
   @Getter(useStore) getAddPeopleAndRoleStep!: PeopleAndRoleIF
   @Getter(useStore) getShowErrors!: boolean
+  @Getter(useStore) isAddPeopleAndRolesValid!: boolean
   @Getter(useStore) isAmalgamationFilingHorizontal!: boolean
   @Getter(useStore) isAmalgamationFilingRegular!: boolean
   @Getter(useStore) isAmalgamationFilingVertical!: boolean
@@ -289,7 +307,8 @@ export default class ListPeopleAndRoles extends Mixins(CommonMixin) {
 
   /** True if error summary should be shown. */
   get showErrorSummary (): boolean {
-    return (this.getShowErrors && !this.getAddPeopleAndRoleStep.valid)
+    // NB - the store getter also verifies each org-person's completeness
+    return (this.getShowErrors && !this.isAddPeopleAndRolesValid)
   }
 
   /** Returns true if org-person is a person. */
@@ -305,6 +324,16 @@ export default class ListPeopleAndRoles extends Mixins(CommonMixin) {
   /** Returns true if specified org/person is a director. */
   isDirector (orgPerson: OrgPersonIF): boolean {
     return orgPerson?.roles.some(role => role.roleType === RoleTypes.DIRECTOR)
+  }
+
+  /** Returns true if specified org/person's row is read-only (an adopted director). */
+  isReadonlyRow (orgPerson: OrgPersonIF): boolean {
+    return (this.readonlyDirectors && this.isDirector(orgPerson))
+  }
+
+  /** Returns the org/person's data issues, for the warning tooltip. */
+  directorIssues (orgPerson: OrgPersonIF): string[] {
+    return GetOrgPersonIssues(orgPerson)
   }
 
   /** Returns true if specified org/person is a proprietor. */
@@ -443,5 +472,4 @@ export default class ListPeopleAndRoles extends Mixins(CommonMixin) {
   &.mdi-delete {
     margin-top: -2px;
   }
-}
-</style>
+}</style>
