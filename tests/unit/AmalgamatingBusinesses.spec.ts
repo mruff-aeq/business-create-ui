@@ -377,6 +377,137 @@ describe('Amalgamating Businesses - add amalgamating business', () => {
     vi.resetAllMocks()
   })
 
+  it('saves an unaffiliated business when the table already has a business - non-staff', async () => {
+    // set state - table already has an (affiliated) business
+    setAuthRole(store, AuthorizationRoles.PUBLIC_USER)
+    store.stateModel.amalgamation.amalgamatingBusinesses = [
+      { type: AmlTypes.LEAR, role: AmlRoles.AMALGAMATING, identifier: 'BC7654321', name: 'Other Business' }
+    ] as any
+    await Vue.nextTick()
+
+    // open panel
+    await wrapper.setData({ isAddingAmalgamatingBusiness: true })
+
+    // mock services functions (only the auth info call succeeds, with Forbidden)
+    vi.spyOn((AuthServices as any), 'fetchAuthInfo').mockResolvedValue({ status: 'FORBIDDEN' })
+    vi.spyOn((LegalServices as any), 'fetchBusinessInfo').mockRejectedValue({ response: { status: 401 } })
+    vi.spyOn((LegalServices as any), 'fetchAddresses').mockRejectedValue({ response: { status: 401 } })
+    vi.spyOn((LegalServices as any), 'fetchFirstTask').mockRejectedValue({ response: { status: 401 } })
+    vi.spyOn((LegalServices as any), 'fetchFirstOrOnlyFiling').mockRejectedValue({ response: { status: 401 } })
+    const rootEmit = vi.spyOn(wrapper.vm.$root, '$emit')
+
+    // simulate saving a BC business
+    await wrapper.vm.saveAmalgamatingBusiness({
+      legalType: CorpTypeCd.BC_COMPANY,
+      name: 'My BC Business',
+      identifier: 'BC1234567'
+    })
+
+    // verify data
+    expect(store.getAmalgamatingBusinesses.length).toBe(2)
+    const business = store.getAmalgamatingBusinesses[1] as any
+    expect(business.type).toBe(AmlTypes.LEAR)
+    expect(business.identifier).toBe('BC1234567')
+    expect(business.name).toBe('My BC Business')
+    expect(business.addresses).toBeUndefined()
+
+    // verify no error dialog, panel is closed and spinner is hidden
+    expect(wrapper.vm.errorDialog).toBe(false)
+    expect(wrapper.vm.isAddingAmalgamatingBusiness).toBe(false)
+    expect(rootEmit).toHaveBeenLastCalledWith('showSpinner', false)
+
+    vi.resetAllMocks()
+  })
+
+  it('doesn\'t save an amalgamating business - unexpected error - hides spinner', async () => {
+    // open panel
+    await wrapper.setData({ isAddingAmalgamatingBusiness: true })
+
+    // mock unexpected error
+    vi.spyOn(wrapper.vm, 'fetchAmalgamatingBusinessInfo').mockRejectedValue(new Error('unexpected'))
+    const rootEmit = vi.spyOn(wrapper.vm.$root, '$emit')
+
+    // simulate saving a BC business
+    await wrapper.vm.saveAmalgamatingBusiness({
+      legalType: CorpTypeCd.BC_COMPANY,
+      name: 'My BC Business',
+      identifier: 'BC1234567'
+    })
+
+    // verify data
+    expect(store.getAmalgamatingBusinesses.length).toBe(0)
+
+    // verify dialog is displayed and spinner is hidden
+    expect(wrapper.vm.errorDialog).toBe(true)
+    expect(wrapper.vm.errorDialogTitle).toBe('Something went wrong')
+    expect(rootEmit).toHaveBeenLastCalledWith('showSpinner', false)
+
+    vi.resetAllMocks()
+  })
+
+  it('doesn\'t save a duplicate amalgamating business - no network calls', async () => {
+    // set state
+    store.stateModel.amalgamation.amalgamatingBusinesses = [
+      { type: AmlTypes.LEAR, role: AmlRoles.AMALGAMATING, identifier: 'BC1234567', name: 'My BC Business' }
+    ] as any
+    await Vue.nextTick()
+
+    // open panel
+    await wrapper.setData({ isAddingAmalgamatingBusiness: true })
+
+    // mock services functions
+    const fetchAuthInfo = vi.spyOn((AuthServices as any), 'fetchAuthInfo').mockResolvedValue({})
+
+    // simulate saving the same BC business again
+    await wrapper.vm.saveAmalgamatingBusiness({
+      legalType: CorpTypeCd.BC_COMPANY,
+      name: 'My BC Business',
+      identifier: 'BC1234567'
+    })
+
+    // verify data
+    expect(store.getAmalgamatingBusinesses.length).toBe(1)
+    expect(fetchAuthInfo).not.toHaveBeenCalled()
+
+    // verify snackbar is displayed and panel is closed
+    expect(wrapper.vm.snackbar).toBe(true)
+    expect(wrapper.vm.snackbarText).toBe('Business is already in table.')
+    expect(wrapper.vm.isAddingAmalgamatingBusiness).toBe(false)
+
+    vi.resetAllMocks()
+  })
+
+  it('shows Business Not Affiliated dialog when setting an unaffiliated business as primary', async () => {
+    // set state
+    setAuthRole(store, AuthorizationRoles.PUBLIC_USER)
+    store.stateModel.accountInformation.id = 1234
+    sessionStorage.setItem('BUSINESS_REGISTRY_URL', 'https://business-registry-dashboard/')
+    await Vue.nextTick()
+
+    // mock service function (should not be called)
+    const updatePrepopulatedData = vi.spyOn(wrapper.vm, 'updatePrepopulatedData')
+
+    // simulate setting an unaffiliated (no addresses) business as primary
+    await wrapper.vm.newHoldingPrimaryBusiness({
+      type: AmlTypes.LEAR,
+      role: AmlRoles.AMALGAMATING,
+      identifier: 'BC1234567',
+      name: 'My BC Business',
+      legalType: CorpTypeCd.BC_COMPANY
+    })
+
+    // verify dialog is displayed with link that auto-opens the affiliation modal
+    expect(updatePrepopulatedData).not.toHaveBeenCalled()
+    expect(wrapper.vm.errorDialog).toBe(true)
+    expect(wrapper.vm.errorDialogTitle).toBe('Business not affiliated')
+    expect(wrapper.vm.errorDialogText).toContain('My BC Business (BC1234567) is not affiliated')
+    expect(wrapper.vm.errorDialogText).toContain(
+      'href="https://business-registry-dashboard/?accountid=1234&populate=BC1234567"'
+    )
+
+    vi.resetAllMocks()
+  })
+
   it('doesn\'t save an amalgamating business - BC - business not found', async () => {
     // open panel
     await wrapper.setData({ isAddingAmalgamatingBusiness: true })

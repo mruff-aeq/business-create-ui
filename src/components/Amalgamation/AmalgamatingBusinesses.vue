@@ -279,8 +279,9 @@ import { RegistriesSearchServices } from '@/services'
 import { BusinessLookup } from '@bcrs-shared-components/business-lookup'
 import { Jurisdiction } from '@bcrs-shared-components/jurisdiction'
 import { MrasJurisdictions } from '@bcrs-shared-components/jurisdiction/list-data'
-import { AmalgamatingBusinessIF, BusinessLookupResultIF, EmptyBusinessLookup } from '@/interfaces'
-import { AuthorizedActions, AmlRoles, AmlTypes, EntityStates } from '@/enums'
+import { AccountInformationIF, AmalgamatingBusinessIF, BusinessLookupResultIF, EmptyBusinessLookup }
+  from '@/interfaces'
+import { AuthorizedActions, AmlRoles, AmlStatuses, AmlTypes, EntityStates } from '@/enums'
 import { JurisdictionLocation } from '@bcrs-shared-components/enums'
 import BusinessTable from '@/components/Amalgamation/BusinessTable.vue'
 import { CorpTypeCd } from '@bcrs-shared-components/corp-type-module'
@@ -312,6 +313,7 @@ export default class AmalgamatingBusinesses extends Mixins(AmalgamationMixin, Co
   readonly EmptyBusinessLookup = EmptyBusinessLookup
 
   // @Getter(useStore) getAmalgamatingBusinesses!: Array<AmalgamatingBusinessIF>
+  @Getter(useStore) getCurrentAccount!: AccountInformationIF
   @Getter(useStore) getShowErrors!: boolean
   // @Getter(useStore) isAmalgamationFilingHorizontal!: boolean
   // @Getter(useStore) isAmalgamationFilingRegular!: boolean
@@ -422,124 +424,100 @@ export default class AmalgamatingBusinesses extends Mixins(AmalgamationMixin, Co
   }
 
   async saveAmalgamatingBusiness (businessLookup: BusinessLookupResultIF): Promise<void> {
-    // Show spinner since the network calls below can take a few seconds.
-    this.$root.$emit('showSpinner', true)
-
-    // Special case to handle Extra Pro A companies.
-    // These are added as COLIN businesses with data from the COLIN snapshot.
-    if ((businessLookup.legalType as any) === CorpTypeCd.EXTRA_PRO_A) {
-      await this.saveXproColinBusiness(businessLookup)
+    // Check for duplicate (before any network calls).
+    if (this.checkForDuplicateInTable(businessLookup)) {
+      this.snackbarText = 'Business is already in table.'
+      this.snackbar = true
       return
     }
 
-    // Special case to handle BC/ULC/CC companies not yet in LEAR (COLIN businesses).
-    // NB - if the snapshot reports the business is actually in LEAR (404), fall through
-    //      to the regular LEAR flow below.
-    if (
-      IsFeatureReleased('amalgamation-colin-businesses') &&
-      (businessLookup as ColinAwareLookupResultIF).modernized === false &&
-      [CorpTypeCd.BC_COMPANY, CorpTypeCd.BC_ULC_COMPANY, CorpTypeCd.BC_CCC]
-        .includes(businessLookup.legalType as unknown as CorpTypeCd)
-    ) {
-      const handled = await this.saveColinBusiness(businessLookup)
-      if (handled) return
-    }
+    try {
+      // Show spinner since the network calls below can take a few seconds.
+      this.$root.$emit('showSpinner', true)
 
-    // Get the business information
-    const business = await this.fetchAmalgamatingBusinessInfo(businessLookup.identifier)
-
-    // Check for unaffiliated business.
-    if (business.authInfo?.status === 'FORBIDDEN') {
-      // Check for duplicate
-      if (this.checkForDuplicateInTable(business.businessInfo)) {
-        this.snackbarText = 'Business is already in table.'
-        this.snackbar = true
-
-        // Hide spinner.
-        this.$root.$emit('showSpinner', false)
-
+      // Special case to handle Extra Pro A companies.
+      // These are added as COLIN businesses with data from the COLIN snapshot.
+      if ((businessLookup.legalType as any) === CorpTypeCd.EXTRA_PRO_A) {
+        await this.saveXproColinBusiness(businessLookup)
         return
       }
 
-      this.pushAmalgamatingBusiness({
+      // Special case to handle BC/ULC/CC companies not yet in LEAR (COLIN businesses).
+      // NB - if the snapshot reports the business is actually in LEAR (404), fall through
+      //      to the regular LEAR flow below.
+      if (
+        IsFeatureReleased('amalgamation-colin-businesses') &&
+        (businessLookup as ColinAwareLookupResultIF).modernized === false &&
+        [CorpTypeCd.BC_COMPANY, CorpTypeCd.BC_ULC_COMPANY, CorpTypeCd.BC_CCC]
+          .includes(businessLookup.legalType as unknown as CorpTypeCd)
+      ) {
+        const handled = await this.saveColinBusiness(businessLookup)
+        if (handled) return
+      }
+
+      // Get the business information
+      const business = await this.fetchAmalgamatingBusinessInfo(businessLookup.identifier)
+
+      // Check for unaffiliated business.
+      // NB - the other fetches fail for an unaffiliated business, so use the lookup data
+      //      to add a minimal row that the Not Affiliated rule will flag.
+      if (business.authInfo?.status === 'FORBIDDEN') {
+        this.addTingBusinessToTable({
+          type: AmlTypes.LEAR,
+          role: AmlRoles.AMALGAMATING,
+          identifier: businessLookup.identifier,
+          name: businessLookup.name,
+          legalType: businessLookup.legalType as unknown as CorpTypeCd
+        })
+        return
+      }
+
+      // Check for business not in LEAR (Auth/Legal dbs).
+      if (business.authInfo?.status === 'NOT_FOUND') {
+        // Report error.
+        console.log('Missing auth info.')
+        this.showUnableToAddBusinessDialog()
+        return
+      }
+
+      // Check for fetch issues.
+      // NB - don't check for null firstTask since that's valid
+      if (!business.authInfo || !business.businessInfo || !business.addresses || !business.firstFiling) {
+        // Report error.
+        console.log('Missing auth info or business info or addresses or first filing.')
+        this.showSomethingWentWrongDialog()
+        return
+      }
+
+      // Create amalgamating business object.
+      const tingBusiness: AmalgamatingBusinessIF = {
         type: AmlTypes.LEAR,
         role: AmlRoles.AMALGAMATING,
-        identifier: businessLookup.identifier,
-        name: businessLookup.name,
-        legalType: businessLookup.legalType as unknown as CorpTypeCd
-      })
+        identifier: business.businessInfo.identifier,
+        name: business.businessInfo.legalName,
+        authInfo: business.authInfo,
+        legalType: business.businessInfo.legalType,
+        addresses: business.addresses,
+        isNotInGoodStanding: (business.businessInfo.goodStanding === false),
+        isFrozen: (business.businessInfo.adminFreeze === true),
+        isFutureEffective: this.isFutureEffective(business),
+        isDraftTask: this.isDraftTask(business),
+        isPendingFiling: this.isPendingFiling(business),
+        isLimitedRestoration: await this.isLimitedRestoration(business),
+        isHistorical: (business.businessInfo.state === EntityStates.HISTORICAL)
+      }
 
-      // Close the "Add an Amalgamating Business" panel.
-      this.isAddingAmalgamatingBusiness = false
-
-      // Hide spinner.
-      this.$root.$emit('showSpinner', false)
-
-      return
-    }
-
-    // Check for business not in LEAR (Auth/Legal dbs).
-    if (business.authInfo?.status === 'NOT_FOUND') {
+      // Add the new business to the amalgamating businesses list.
+      this.addTingBusinessToTable(tingBusiness)
+    } catch (error) {
       // Report error.
-      console.log('Missing auth info.')
-      this.showUnableToAddBusinessDialog()
-
-      // Hide spinner.
-      this.$root.$emit('showSpinner', false)
-
-      return
-    }
-
-    // Check for fetch issues.
-    // NB - don't check for null firstTask since that's valid
-    if (!business.authInfo || !business.businessInfo || !business.addresses || !business.firstFiling) {
-      // Report error.
-      console.log('Missing auth info or business info or addresses or first filing.')
+      console.log('Error adding amalgamating business =', error)
       this.showSomethingWentWrongDialog()
-
+    } finally {
       // Hide spinner.
+      // NB - this also runs on early return or unexpected error, so the UI never hangs.
       this.$root.$emit('showSpinner', false)
-
-      return
     }
-
-    // Create amalgamating business object.
-    const tingBusiness: AmalgamatingBusinessIF = {
-      type: AmlTypes.LEAR,
-      role: AmlRoles.AMALGAMATING,
-      identifier: business.businessInfo.identifier,
-      name: business.businessInfo.legalName,
-      authInfo: business.authInfo,
-      legalType: business.businessInfo.legalType,
-      addresses: business.addresses,
-      isNotInGoodStanding: (business.businessInfo.goodStanding === false),
-      isFrozen: (business.businessInfo.adminFreeze === true),
-      isFutureEffective: this.isFutureEffective(business),
-      isDraftTask: this.isDraftTask(business),
-      isPendingFiling: this.isPendingFiling(business),
-      isLimitedRestoration: await this.isLimitedRestoration(business),
-      isHistorical: (business.businessInfo.state === EntityStates.HISTORICAL)
-    }
-
-    // Check for duplicate.
-    if (this.checkForDuplicateInTable(tingBusiness)) {
-      this.snackbarText = 'Business is already in table.'
-      this.snackbar = true
-
-      // Hide spinner.
-      this.$root.$emit('showSpinner', false)
-
-      return
-    }
-
-    // Add the new business to the amalgamating businesses list.
-    this.pushAmalgamatingBusiness(tingBusiness)
-
-    // Close the "Add an Amalgamating Business" panel.
-    this.isAddingAmalgamatingBusiness = false
-
-    // Hide spinner.
-    this.$root.$emit('showSpinner', false)
   }
 
   /**
@@ -582,10 +560,6 @@ export default class AmalgamatingBusinesses extends Mixins(AmalgamationMixin, Co
       // Report error.
       console.log('Unable to fetch COLIN snapshot, status =', snapshotStatus)
       this.showSomethingWentWrongDialog()
-
-      // Hide spinner.
-      this.$root.$emit('showSpinner', false)
-
       return true
     }
 
@@ -627,36 +601,18 @@ export default class AmalgamatingBusinesses extends Mixins(AmalgamationMixin, Co
       // Report error.
       console.log('Unable to fetch COLIN snapshot, status =', snapshotStatus)
       this.showSomethingWentWrongDialog()
-
-      // Hide spinner.
-      this.$root.$emit('showSpinner', false)
-
       return
     }
 
     this.addTingBusinessToTable(tingBusiness)
   }
 
-  /** Adds the ting business to the table (checking for duplicate) and closes the panel. */
+  /** Adds the ting business to the table and closes the panel. */
   private addTingBusinessToTable (tingBusiness: AmalgamatingBusinessIF): void {
-    // Check for duplicate.
-    if (this.checkForDuplicateInTable(tingBusiness)) {
-      this.snackbarText = 'Business is already in table.'
-      this.snackbar = true
-
-      // Hide spinner.
-      this.$root.$emit('showSpinner', false)
-
-      return
-    }
-
     this.pushAmalgamatingBusiness(tingBusiness)
 
     // Close the "Add an Amalgamating Business" panel.
     this.isAddingAmalgamatingBusiness = false
-
-    // Hide spinner.
-    this.$root.$emit('showSpinner', false)
   }
 
   saveAmalgamatingForeignBusiness (): void {
@@ -698,6 +654,12 @@ export default class AmalgamatingBusinesses extends Mixins(AmalgamationMixin, Co
 
   /** Sets the specified business as the new holding/primary business. */
   async newHoldingPrimaryBusiness (business: AmalgamatingBusinessIF): Promise<void> {
+    // Check for unaffiliated business (its data can't be fetched until it's affiliated).
+    if (this.notAffiliated(business) === AmlStatuses.ERROR_NOT_AFFILIATED) {
+      this.showBusinessNotAffiliatedDialog(business)
+      return
+    }
+
     try {
       // Show spinner since the network calls below can take a few seconds.
       this.$root.$emit('showSpinner', true)
@@ -721,6 +683,20 @@ export default class AmalgamatingBusinesses extends Mixins(AmalgamationMixin, Co
     this.errorDialogText = 'The business you selected could not be added to this filing. This is ' +
       'likely because that business has not been moved to the modernized system yet.<br><br> Please ' +
       'contact us:'
+    this.errorDialog = true
+  }
+
+  /** Shows the dialog with a link to affiliate the business (auto-opens the affiliation modal). */
+  private showBusinessNotAffiliatedDialog (business: AmalgamatingBusinessIF): void {
+    const accountId = this.getCurrentAccount?.id
+    const url = sessionStorage.getItem('BUSINESS_REGISTRY_URL') +
+      (accountId ? `?accountid=${accountId}&` : '?') + `populate=${encodeURIComponent(business.identifier)}`
+
+    this.errorDialogTitle = 'Business not affiliated'
+    this.errorDialogText = `${business.name} (${business.identifier}) is not affiliated with the currently ` +
+      'selected BC Registries account so it cannot be set as the primary business.<br><br>' +
+      `<a href="${url}" target="_blank" rel="noopener">Affiliate this business</a> with your account on ` +
+      'the My Business Registry page, then return here and try again.<br><br>If you need help, please contact us:'
     this.errorDialog = true
   }
 
